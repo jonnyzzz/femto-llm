@@ -8,7 +8,7 @@ services:
       - FEMTOLLM_CONFIG=/data/config.json
     network_mode: host
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8880/health"]
       interval: 15s
       timeout: 5s
       retries: 3
