@@ -3,27 +3,15 @@
   "backends": [
     {
       "name": "gemma4-vllm",
-      "pattern": "(?i)gemma",
-      "url": "http://spark-07:8004",
-      "model": "google/gemma-4-31B-it"
-    },
-    {
-      "name": "nemotron-vllm",
-      "pattern": "(?i)(nemotron|nvidia)",
-      "url": "http://spark-07:8003",
-      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
-    },
-    {
-      "name": "qwen3-coder",
-      "pattern": "(?i)(qwen|coder)",
-      "url": "http://spark-07:11434",
-      "model": "qwen3-coder:30b"
-    },
-    {
-      "name": "gemma4-default",
       "pattern": ".*",
       "url": "http://spark-07:8004",
       "model": "google/gemma-4-31B-it"
+    },
+    {
+      "name": "qwen3-coder",
+      "pattern": ".*",
+      "url": "http://spark-07:11434",
+      "model": "qwen3-coder:30b"
     }
   ]
 }
