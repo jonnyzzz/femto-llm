@@ -134,6 +134,98 @@ func TestModelsEndpoint_MaxContext(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_InjectsChatTemplateKwargs(t *testing.T) {
+	var receivedBody []byte
+	backend := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		chatCompletionHandler("ok")(w, r)
+	})
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{
+				Name: "vllm", Pattern: ".*", URL: backend.URL, Model: "gemma",
+				ChatTemplateKwargs: map[string]any{"enable_thinking": true},
+			},
+		},
+	}
+	for i := range cfg.Backends {
+		cfg.Backends[i].Match("test")
+	}
+
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	body := `{"model":"gemma","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify chat_template_kwargs was injected
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(receivedBody, &parsed); err != nil {
+		t.Fatalf("parse forwarded body: %v", err)
+	}
+	kwargs, ok := parsed["chat_template_kwargs"]
+	if !ok {
+		t.Fatal("expected chat_template_kwargs to be injected")
+	}
+	var kwargsMap map[string]any
+	if err := json.Unmarshal(kwargs, &kwargsMap); err != nil {
+		t.Fatalf("parse kwargs: %v", err)
+	}
+	if kwargsMap["enable_thinking"] != true {
+		t.Errorf("expected enable_thinking=true, got %v", kwargsMap["enable_thinking"])
+	}
+}
+
+func TestChatCompletions_DoesNotOverrideExistingKwargs(t *testing.T) {
+	var receivedBody []byte
+	backend := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		chatCompletionHandler("ok")(w, r)
+	})
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{
+				Name: "vllm", Pattern: ".*", URL: backend.URL, Model: "gemma",
+				ChatTemplateKwargs: map[string]any{"enable_thinking": true},
+			},
+		},
+	}
+	for i := range cfg.Backends {
+		cfg.Backends[i].Match("test")
+	}
+
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	// Request already has chat_template_kwargs — proxy should NOT override
+	body := `{"model":"gemma","messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":false}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var parsed map[string]json.RawMessage
+	json.Unmarshal(receivedBody, &parsed)
+	var kwargsMap map[string]any
+	json.Unmarshal(parsed["chat_template_kwargs"], &kwargsMap)
+	if kwargsMap["enable_thinking"] != false {
+		t.Errorf("expected client's enable_thinking=false to be preserved, got %v", kwargsMap["enable_thinking"])
+	}
+}
+
 func TestChatCompletions_RoutesToBackend(t *testing.T) {
 	backend := newTestBackend(t, chatCompletionHandler("Hello from vLLM"))
 	defer backend.Close()

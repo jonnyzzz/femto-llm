@@ -7,14 +7,16 @@
       "url": "http://spark-07:8004",
       "model": "google/gemma-4-31B-it",
       "max_context": 32768,
-      "preferred": true
+      "preferred": true,
+      "chat_template_kwargs": {"enable_thinking": true}
     },
     {
       "name": "gemma4-thor",
       "pattern": ".*",
       "url": "http://thor-04:8000",
       "model": "google/gemma-4-31B-it",
-      "max_context": 106496
+      "max_context": 106496,
+      "chat_template_kwargs": {"enable_thinking": true}
     }
   ]
 }

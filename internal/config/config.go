@@ -11,15 +11,16 @@ import (
 
 // Backend defines an LLM backend with routing rules.
 type Backend struct {
-	Name       string `json:"name"`
-	Pattern    string `json:"pattern"`              // regex to match model names
-	URL        string `json:"url"`                  // backend base URL (e.g. http://localhost:8000)
-	Model      string `json:"model,omitempty"`       // override model name sent to backend
-	APIKey     string `json:"api_key,omitempty"`     // API key for the backend
-	Protocol   string `json:"protocol,omitempty"`    // "openai" (default), "anthropic"
-	Priority   int    `json:"priority,omitempty"`    // lower = tried first for fallback groups
-	MaxContext int    `json:"max_context,omitempty"` // override max context length reported to clients (0 = use backend default)
-	Preferred  bool   `json:"preferred,omitempty"`   // always try first when healthy (no round-robin)
+	Name               string            `json:"name"`
+	Pattern            string            `json:"pattern"`                          // regex to match model names
+	URL                string            `json:"url"`                              // backend base URL (e.g. http://localhost:8000)
+	Model              string            `json:"model,omitempty"`                   // override model name sent to backend
+	APIKey             string            `json:"api_key,omitempty"`                 // API key for the backend
+	Protocol           string            `json:"protocol,omitempty"`                // "openai" (default), "anthropic"
+	Priority           int               `json:"priority,omitempty"`                // lower = tried first for fallback groups
+	MaxContext         int               `json:"max_context,omitempty"`             // override max context length reported to clients (0 = use backend default)
+	Preferred          bool              `json:"preferred,omitempty"`               // always try first when healthy (no round-robin)
+	ChatTemplateKwargs map[string]any    `json:"chat_template_kwargs,omitempty"`    // injected into requests (e.g. {"enable_thinking": true})
 
 	compiled *regexp.Regexp
 }

@@ -261,13 +261,21 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 // forwardOpenAI proxies a request to an OpenAI-compatible backend.
 // For streaming requests, it pipes the SSE response directly.
 func (s *Server) forwardOpenAI(w http.ResponseWriter, r *http.Request, body []byte, req *protocol.ChatRequest, backend *config.Backend) error {
-	// Rewrite model name
+	// Rewrite model name and inject chat_template_kwargs
 	var modified map[string]json.RawMessage
 	if err := json.Unmarshal(body, &modified); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 	targetModel := backend.TargetModel(req.Model)
 	modified["model"], _ = json.Marshal(targetModel)
+
+	// Inject chat_template_kwargs if configured and not already present in the request
+	if len(backend.ChatTemplateKwargs) > 0 {
+		if _, exists := modified["chat_template_kwargs"]; !exists {
+			modified["chat_template_kwargs"], _ = json.Marshal(backend.ChatTemplateKwargs)
+		}
+	}
+
 	reqBody, _ := json.Marshal(modified)
 
 	url := strings.TrimRight(backend.URL, "/") + "/v1/chat/completions"
