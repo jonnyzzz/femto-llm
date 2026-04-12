@@ -39,7 +39,7 @@ cp config.example.json config.json
       "pattern": ".*",
       "url": "http://spark-07:8004",
       "model": "google/gemma-4-31B-it",
-      "max_context": 32768,
+      "max_context": 106496,
       "preferred": true
     },
     {
