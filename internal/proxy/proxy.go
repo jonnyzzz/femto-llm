@@ -328,23 +328,30 @@ func (s *Server) handleBackendHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type entry struct {
-		Name      string `json:"name"`
-		URL       string `json:"url"`
-		Alive     bool   `json:"alive"`
-		LastCheck string `json:"last_check,omitempty"`
-		LastError string `json:"last_error,omitempty"`
+		Name            string  `json:"name"`
+		URL             string  `json:"url"`
+		Alive           bool    `json:"alive"`
+		Preferred       bool    `json:"preferred,omitempty"`
+		LastCheck       string  `json:"last_check,omitempty"`
+		LastError       string  `json:"last_error,omitempty"`
+		KVCacheUsage    float64 `json:"kv_cache_usage"`
+		RequestsRunning int     `json:"requests_running"`
+		RequestsWaiting int     `json:"requests_waiting"`
 	}
 
 	statuses := s.Checker.Statuses()
 	var entries []entry
 	for _, b := range s.Config.Backends {
-		e := entry{Name: b.Name, URL: b.URL}
+		e := entry{Name: b.Name, URL: b.URL, Preferred: b.Preferred}
 		if st, ok := statuses[b.Name]; ok {
 			e.Alive = st.Alive
 			if !st.LastCheck.IsZero() {
 				e.LastCheck = st.LastCheck.Format(time.RFC3339)
 			}
 			e.LastError = st.LastError
+			e.KVCacheUsage = st.KVCacheUsage
+			e.RequestsRunning = st.RequestsRunning
+			e.RequestsWaiting = st.RequestsWaiting
 		}
 		entries = append(entries, e)
 	}

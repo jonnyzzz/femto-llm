@@ -1,21 +1,39 @@
 package health
 
 import (
+	"bufio"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Status tracks the health of a single backend.
+// Status tracks the health and load metrics of a single backend.
 type Status struct {
 	Alive     bool
 	LastCheck time.Time
 	LastError string
+	// Metrics from vLLM /metrics endpoint (updated each health check)
+	KVCacheUsage    float64 // 0.0–1.0, fraction of KV-cache in use
+	RequestsRunning int     // number of requests currently being processed
+	RequestsWaiting int     // number of requests queued
 }
 
-// Checker periodically probes backends and tracks which are alive.
+// Load returns a score representing how loaded this backend is (lower = less loaded).
+// Returns -1 if the backend is not alive.
+func (s *Status) Load() float64 {
+	if !s.Alive {
+		return -1
+	}
+	// KV-cache usage is the primary signal: a backend near capacity can't accept
+	// long-context requests. Running+waiting requests indicate queuing pressure.
+	return s.KVCacheUsage + 0.01*float64(s.RequestsRunning+s.RequestsWaiting)
+}
+
+// Checker periodically probes backends and tracks health + load metrics.
 type Checker struct {
 	mu       sync.RWMutex
 	status   map[string]*Status // keyed by backend name
@@ -69,6 +87,18 @@ func (c *Checker) IsAlive(name string) bool {
 	return s.Alive
 }
 
+// GetStatus returns the full status for a backend (nil if unknown).
+func (c *Checker) GetStatus(name string) *Status {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	s, ok := c.status[name]
+	if !ok {
+		return nil
+	}
+	copy := *s
+	return &copy
+}
+
 // Statuses returns a snapshot of all backend health statuses.
 func (c *Checker) Statuses() map[string]Status {
 	c.mu.RLock()
@@ -107,6 +137,7 @@ func (c *Checker) loop() {
 }
 
 func (c *Checker) checkOne(b *Backend) {
+	// Health check via /v1/models
 	url := strings.TrimRight(b.URL, "/") + "/v1/models"
 	resp, err := c.client.Get(url)
 
@@ -145,5 +176,74 @@ func (c *Checker) checkOne(b *Backend) {
 		if wasAlive {
 			log.Printf("health: backend %s is DOWN: %s", b.Name, resp.Status)
 		}
+		return
 	}
+
+	// Scrape load metrics from /metrics (best-effort, don't fail health on this)
+	c.mu.Unlock() // release lock during metrics fetch
+	metrics := c.scrapeMetrics(b)
+	c.mu.Lock() // re-acquire
+	s.KVCacheUsage = metrics.kvCache
+	s.RequestsRunning = metrics.running
+	s.RequestsWaiting = metrics.waiting
+}
+
+type metricsResult struct {
+	kvCache float64
+	running int
+	waiting int
+}
+
+// scrapeMetrics fetches vLLM Prometheus metrics. Returns zero values on failure.
+func (c *Checker) scrapeMetrics(b *Backend) metricsResult {
+	url := strings.TrimRight(b.URL, "/") + "/metrics"
+	resp, err := c.client.Get(url)
+	if err != nil {
+		return metricsResult{}
+	}
+	defer resp.Body.Close()
+
+	return parsePrometheusMetrics(resp.Body)
+}
+
+// parsePrometheusMetrics extracts vLLM metrics from Prometheus text format.
+func parsePrometheusMetrics(r io.Reader) metricsResult {
+	var m metricsResult
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Lines look like: vllm:kv_cache_usage_perc{engine="0",...} 0.42
+		if strings.HasPrefix(line, "vllm:kv_cache_usage_perc") {
+			if v, ok := parsePrometheusValue(line); ok {
+				m.kvCache = v
+			}
+		} else if strings.HasPrefix(line, "vllm:num_requests_running") {
+			if v, ok := parsePrometheusValue(line); ok {
+				m.running = int(v)
+			}
+		} else if strings.HasPrefix(line, "vllm:num_requests_waiting") {
+			if v, ok := parsePrometheusValue(line); ok {
+				m.waiting = int(v)
+			}
+		}
+	}
+	return m
+}
+
+// parsePrometheusValue extracts the float value from a Prometheus metric line.
+// Format: metric_name{labels...} value
+func parsePrometheusValue(line string) (float64, bool) {
+	// Value is the last space-separated field
+	idx := strings.LastIndexByte(line, ' ')
+	if idx < 0 {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(line[idx+1:]), 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
