@@ -5,7 +5,8 @@
       "name": "gemma4-vllm",
       "pattern": ".*",
       "url": "http://thor-04:8000",
-      "model": "google/gemma-4-31B-it"
+      "model": "google/gemma-4-31B-it",
+      "max_context": 106496
     }
   ]
 }

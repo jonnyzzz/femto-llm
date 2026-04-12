@@ -90,6 +90,50 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestModelsEndpoint_MaxContext(t *testing.T) {
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{Name: "gemma", Model: "gemma-4", MaxContext: 106496},
+			{Name: "qwen", Model: "qwen-3"},
+		},
+	}
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp protocol.ModelsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(resp.Data))
+	}
+
+	// First model should have max_model_len set
+	if resp.Data[0].MaxModelLen != 106496 {
+		t.Errorf("expected max_model_len 106496 for gemma, got %d", resp.Data[0].MaxModelLen)
+	}
+
+	// Second model should have max_model_len omitted (0)
+	if resp.Data[1].MaxModelLen != 0 {
+		t.Errorf("expected max_model_len 0 (omitted) for qwen, got %d", resp.Data[1].MaxModelLen)
+	}
+
+	// Verify JSON: max_model_len should be absent for qwen
+	raw := w.Body.String()
+	// gemma entry should contain max_model_len
+	if !strings.Contains(raw, `"max_model_len":106496`) {
+		t.Errorf("expected max_model_len in JSON for gemma, got: %s", raw)
+	}
+}
+
 func TestChatCompletions_RoutesToBackend(t *testing.T) {
 	backend := newTestBackend(t, chatCompletionHandler("Hello from vLLM"))
 	defer backend.Close()

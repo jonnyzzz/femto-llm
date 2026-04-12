@@ -51,8 +51,9 @@ type ModelsResponse struct {
 }
 
 type ModelEntry struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID          string `json:"id"`
+	Object      string `json:"object"`
+	Created     int64  `json:"created"`
+	OwnedBy     string `json:"owned_by"`
+	MaxModelLen int    `json:"max_model_len,omitempty"` // context window size (0 = omitted)
 }

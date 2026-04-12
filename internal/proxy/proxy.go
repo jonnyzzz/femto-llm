@@ -82,10 +82,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	var entries []protocol.ModelEntry
 	for _, m := range models {
 		entries = append(entries, protocol.ModelEntry{
-			ID:      m,
-			Object:  "model",
-			Created: time.Now().Unix(),
-			OwnedBy: "femtollm",
+			ID:          m.Name,
+			Object:      "model",
+			Created:     time.Now().Unix(),
+			OwnedBy:     "femtollm",
+			MaxModelLen: m.MaxContext,
 		})
 	}
 

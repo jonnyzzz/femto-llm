@@ -156,6 +156,25 @@ func TestAdvertisedModels(t *testing.T) {
 	}
 	models := cfg.AdvertisedModels()
 	if len(models) != 2 {
-		t.Errorf("expected 2 unique models, got %d: %v", len(models), models)
+		t.Errorf("expected 2 unique models, got %d", len(models))
+	}
+}
+
+func TestAdvertisedModels_MaxContext(t *testing.T) {
+	cfg := &Config{
+		Backends: []Backend{
+			{Name: "gemma", Model: "gemma-4", MaxContext: 106496},
+			{Name: "qwen", Model: "qwen-3"},
+		},
+	}
+	models := cfg.AdvertisedModels()
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].MaxContext != 106496 {
+		t.Errorf("expected MaxContext 106496, got %d", models[0].MaxContext)
+	}
+	if models[1].MaxContext != 0 {
+		t.Errorf("expected MaxContext 0 (unset), got %d", models[1].MaxContext)
 	}
 }

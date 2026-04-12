@@ -11,13 +11,14 @@ import (
 
 // Backend defines an LLM backend with routing rules.
 type Backend struct {
-	Name     string `json:"name"`
-	Pattern  string `json:"pattern"`            // regex to match model names
-	URL      string `json:"url"`                // backend base URL (e.g. http://localhost:8000)
-	Model    string `json:"model,omitempty"`     // override model name sent to backend
-	APIKey   string `json:"api_key,omitempty"`   // API key for the backend
-	Protocol string `json:"protocol,omitempty"`  // "openai" (default), "anthropic"
-	Priority int    `json:"priority,omitempty"`  // lower = tried first for fallback groups
+	Name       string `json:"name"`
+	Pattern    string `json:"pattern"`              // regex to match model names
+	URL        string `json:"url"`                  // backend base URL (e.g. http://localhost:8000)
+	Model      string `json:"model,omitempty"`       // override model name sent to backend
+	APIKey     string `json:"api_key,omitempty"`     // API key for the backend
+	Protocol   string `json:"protocol,omitempty"`    // "openai" (default), "anthropic"
+	Priority   int    `json:"priority,omitempty"`    // lower = tried first for fallback groups
+	MaxContext int    `json:"max_context,omitempty"` // override max context length reported to clients (0 = use backend default)
 
 	compiled *regexp.Regexp
 }
@@ -111,10 +112,16 @@ func (c *Config) FindBackends(model string) []Backend {
 	return matches
 }
 
-// AdvertisedModels returns the deduplicated list of model names from all backends.
-func (c *Config) AdvertisedModels() []string {
+// AdvertisedModel holds a model name and optional context limit for the /v1/models response.
+type AdvertisedModel struct {
+	Name       string
+	MaxContext int // 0 means not set (omit from response)
+}
+
+// AdvertisedModels returns the deduplicated list of models from all backends.
+func (c *Config) AdvertisedModels() []AdvertisedModel {
 	seen := map[string]bool{}
-	var models []string
+	var models []AdvertisedModel
 	for _, b := range c.Backends {
 		name := b.Model
 		if name == "" {
@@ -122,7 +129,10 @@ func (c *Config) AdvertisedModels() []string {
 		}
 		if !seen[name] {
 			seen[name] = true
-			models = append(models, name)
+			models = append(models, AdvertisedModel{
+				Name:       name,
+				MaxContext: b.MaxContext,
+			})
 		}
 	}
 	return models
