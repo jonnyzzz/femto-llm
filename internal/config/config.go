@@ -19,6 +19,7 @@ type Backend struct {
 	Protocol   string `json:"protocol,omitempty"`    // "openai" (default), "anthropic"
 	Priority   int    `json:"priority,omitempty"`    // lower = tried first for fallback groups
 	MaxContext int    `json:"max_context,omitempty"` // override max context length reported to clients (0 = use backend default)
+	Preferred  bool   `json:"preferred,omitempty"`   // always try first when healthy (no round-robin)
 
 	compiled *regexp.Regexp
 }

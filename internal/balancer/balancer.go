@@ -7,7 +7,7 @@ import (
 	"github.com/jonnyzzz/jonnyzzz-femtollm/internal/health"
 )
 
-// Balancer selects backends using round-robin among healthy instances.
+// Balancer selects backends using preferred-first routing with round-robin fallback.
 type Balancer struct {
 	mu      sync.Mutex
 	counter map[string]uint64
@@ -22,37 +22,47 @@ func NewBalancer(checker *health.Checker) *Balancer {
 	}
 }
 
-// Select filters backends to healthy ones and rotates the order via round-robin.
-// The returned slice preserves fallback semantics: the starting backend rotates,
-// but all healthy backends remain in the list for fallback.
-// If all backends are unhealthy, returns all of them (fail-open).
+// Select returns backends ordered for a request:
+//  1. Healthy preferred backends come first (in config order, no rotation).
+//  2. Remaining healthy backends follow, rotated via round-robin.
+//  3. If all are unhealthy, returns the original list (fail-open).
 func (b *Balancer) Select(backends []config.Backend, model string) []config.Backend {
 	if len(backends) <= 1 {
 		return backends
 	}
 
-	// Filter to healthy backends
-	var healthy []config.Backend
+	// Split into preferred and regular, filtering to healthy
+	var preferred, regular []config.Backend
 	for _, be := range backends {
-		if b.checker == nil || b.checker.IsAlive(be.Name) {
-			healthy = append(healthy, be)
+		if b.checker != nil && !b.checker.IsAlive(be.Name) {
+			continue
+		}
+		if be.Preferred {
+			preferred = append(preferred, be)
+		} else {
+			regular = append(regular, be)
 		}
 	}
 
 	// Fail-open: if all are dead, return original list
-	if len(healthy) == 0 {
+	if len(preferred) == 0 && len(regular) == 0 {
 		return backends
 	}
 
-	// Round-robin: rotate starting point
-	b.mu.Lock()
-	idx := b.counter[model] % uint64(len(healthy))
-	b.counter[model]++
-	b.mu.Unlock()
+	// Round-robin only among regular (non-preferred) backends
+	if len(regular) > 1 {
+		b.mu.Lock()
+		idx := b.counter[model] % uint64(len(regular))
+		b.counter[model]++
+		b.mu.Unlock()
 
-	rotated := make([]config.Backend, len(healthy))
-	for i := range healthy {
-		rotated[i] = healthy[(int(idx)+i)%len(healthy)]
+		rotated := make([]config.Backend, len(regular))
+		for i := range regular {
+			rotated[i] = regular[(int(idx)+i)%len(regular)]
+		}
+		regular = rotated
 	}
-	return rotated
+
+	// Preferred first, then round-robin regular as fallback
+	return append(preferred, regular...)
 }

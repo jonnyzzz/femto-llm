@@ -102,3 +102,84 @@ func TestSelect_Empty(t *testing.T) {
 		t.Error("expected empty result for empty input")
 	}
 }
+
+func TestSelect_PreferredAlwaysFirst(t *testing.T) {
+	b := NewBalancer(nil)
+	bs := []config.Backend{
+		{Name: "regular-a", URL: "http://a"},
+		{Name: "preferred", URL: "http://p", Preferred: true},
+		{Name: "regular-b", URL: "http://b"},
+	}
+
+	// Preferred should always be first, regardless of round-robin
+	for i := 0; i < 10; i++ {
+		selected := b.Select(bs, "model")
+		if selected[0].Name != "preferred" {
+			t.Fatalf("request %d: expected preferred first, got %s", i, selected[0].Name)
+		}
+		if len(selected) != 3 {
+			t.Fatalf("request %d: expected 3 backends, got %d", i, len(selected))
+		}
+	}
+}
+
+func TestSelect_PreferredDown_FallsBackToRoundRobin(t *testing.T) {
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthy.Close()
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	checker := health.NewChecker([]health.Backend{
+		{Name: "preferred", URL: deadURL},
+		{Name: "fallback-a", URL: healthy.URL},
+		{Name: "fallback-b", URL: healthy.URL},
+	}, time.Hour, 1*time.Second)
+	checker.CheckNow()
+
+	b := NewBalancer(checker)
+	bs := []config.Backend{
+		{Name: "preferred", URL: deadURL, Preferred: true},
+		{Name: "fallback-a", URL: healthy.URL},
+		{Name: "fallback-b", URL: healthy.URL},
+	}
+
+	// Preferred is dead — should get only the two fallbacks, round-robined
+	counts := map[string]int{}
+	for i := 0; i < 10; i++ {
+		selected := b.Select(bs, "model")
+		if len(selected) != 2 {
+			t.Fatalf("expected 2 healthy backends, got %d", len(selected))
+		}
+		counts[selected[0].Name]++
+	}
+
+	if counts["preferred"] > 0 {
+		t.Errorf("dead preferred should not appear, got %d times first", counts["preferred"])
+	}
+	if counts["fallback-a"] != 5 || counts["fallback-b"] != 5 {
+		t.Errorf("expected 5/5 round-robin among fallbacks, got a=%d b=%d", counts["fallback-a"], counts["fallback-b"])
+	}
+}
+
+func TestSelect_RegularBackendsStillRoundRobin(t *testing.T) {
+	b := NewBalancer(nil)
+	bs := []config.Backend{
+		{Name: "preferred", URL: "http://p", Preferred: true},
+		{Name: "a", URL: "http://a"},
+		{Name: "b", URL: "http://b"},
+	}
+
+	// Preferred is always first, but the remaining regular ones should rotate
+	secondCounts := map[string]int{}
+	for i := 0; i < 10; i++ {
+		selected := b.Select(bs, "model")
+		secondCounts[selected[1].Name]++
+	}
+
+	if secondCounts["a"] != 5 || secondCounts["b"] != 5 {
+		t.Errorf("expected 5/5 round-robin for 2nd position, got a=%d b=%d", secondCounts["a"], secondCounts["b"])
+	}
+}

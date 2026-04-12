@@ -2,7 +2,15 @@
   "listen": ":8880",
   "backends": [
     {
-      "name": "gemma4-vllm",
+      "name": "gemma4-spark",
+      "pattern": ".*",
+      "url": "http://spark-07:8004",
+      "model": "google/gemma-4-31B-it",
+      "max_context": 32768,
+      "preferred": true
+    },
+    {
+      "name": "gemma4-thor",
       "pattern": ".*",
       "url": "http://thor-04:8000",
       "model": "google/gemma-4-31B-it",
