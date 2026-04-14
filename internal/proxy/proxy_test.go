@@ -552,6 +552,66 @@ func TestBackendHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_StreamingFlush(t *testing.T) {
+	// Simulate an SSE streaming backend that sends chunks with small delays
+	sseChunks := []string{
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+		"data: [DONE]\n\n",
+	}
+
+	backend := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("backend ResponseWriter does not support Flusher")
+			return
+		}
+		for _, chunk := range sseChunks {
+			_, _ = w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+	})
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{Name: "sse", Pattern: ".*", URL: backend.URL, Model: "test-model"},
+		},
+	}
+	for i := range cfg.Backends {
+		cfg.Backends[i].Match("test")
+	}
+
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify all SSE chunks were forwarded
+	result := w.Body.String()
+	for _, chunk := range sseChunks {
+		if !strings.Contains(result, strings.TrimSpace(chunk)) {
+			t.Errorf("expected chunk %q in response, got: %s", chunk, result)
+		}
+	}
+
+	// Verify Content-Type is SSE
+	ct := w.Header().Get("Content-Type")
+	if ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %s", ct)
+	}
+}
+
 func TestAnthropicMessages_FallbackOnError(t *testing.T) {
 	failing := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

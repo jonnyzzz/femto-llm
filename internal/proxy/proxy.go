@@ -304,14 +304,37 @@ func (s *Server) forwardOpenAI(w http.ResponseWriter, r *http.Request, body []by
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	// Pipe response directly (works for both streaming and non-streaming)
+	// Copy response headers
 	for k, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+
+	// For streaming SSE responses, flush after each read to prevent buffering.
+	// Without explicit Flush(), Go's ResponseWriter accumulates small SSE chunks
+	// in its internal buffer, causing multi-second pauses between token batches.
+	if req.Stream {
+		if flusher, ok := w.(http.Flusher); ok {
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := resp.Body.Read(buf)
+				if n > 0 {
+					_, _ = w.Write(buf[:n])
+					flusher.Flush()
+				}
+				if readErr != nil {
+					break
+				}
+			}
+		} else {
+			_, _ = io.Copy(w, resp.Body)
+		}
+	} else {
+		_, _ = io.Copy(w, resp.Body)
+	}
+
 	resp.Body.Close()
 	return nil
 }
