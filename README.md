@@ -37,7 +37,7 @@ cp config.example.json config.json
     {
       "name": "gemma4-spark",
       "pattern": ".*",
-      "url": "http://spark-07:8004",
+      "url": "http://spark-07:8000",
       "model": "google/gemma-4-31B-it",
       "max_context": 106496,
       "preferred": true
