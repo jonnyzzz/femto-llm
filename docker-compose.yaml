@@ -4,6 +4,11 @@ services:
     # tini as PID 1 so orphaned subprocesses are reaped. Required by stevedore.
     init: true
     restart: on-failure:5
+    labels:
+      - "stevedore.ingress.enabled=true"
+      - "stevedore.ingress.subdomain=femto-llm"
+      - "stevedore.ingress.port=8880"
+      - "stevedore.ingress.healthcheck=/health"
     volumes:
       - ${STEVEDORE_DATA:-./data}:/data
     environment:
