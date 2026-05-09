@@ -303,6 +303,85 @@ func TestChatCompletions_ModelRouting(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_DirectBackendRoute(t *testing.T) {
+	a := newTestBackend(t, chatCompletionHandler("from A"))
+	defer a.Close()
+	b := newTestBackend(t, chatCompletionHandler("from B"))
+	defer b.Close()
+
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{Name: "alpha", Pattern: `(?i)qwen`, URL: a.URL, Model: "alpha-model"},
+			{Name: "beta", Pattern: `(?i)qwen`, URL: b.URL, Model: "beta-model"},
+		},
+	}
+	for i := range cfg.Backends {
+		cfg.Backends[i].Match("test")
+	}
+	srv := NewServer(cfg)
+
+	// Direct route /beta/... must hit beta even though both match the model regex.
+	body := `{"model":"qwen-test","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/beta/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("direct /beta route: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp protocol.ChatResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Model != "beta-model" {
+		t.Errorf("direct /beta route: expected beta-model, got %s", resp.Model)
+	}
+
+	// Direct route also bypasses model-pattern check — requesting an unrelated model
+	// via /alpha/... still lands on alpha.
+	body = `{"model":"llama-something","messages":[{"role":"user","content":"hi"}]}`
+	req = httptest.NewRequest(http.MethodPost, "/alpha/v1/chat/completions", strings.NewReader(body))
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("direct /alpha for non-matching model: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Model != "alpha-model" {
+		t.Errorf("direct /alpha route: expected alpha-model, got %s", resp.Model)
+	}
+
+	// Default (non-pinned) /v1/... still works and goes through model-regex matching.
+	body = `{"model":"qwen-test","messages":[{"role":"user","content":"hi"}]}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("default route: expected 200, got %d", w.Code)
+	}
+}
+
+func TestChatCompletions_DirectRoute_UnknownBackend(t *testing.T) {
+	a := newTestBackend(t, chatCompletionHandler("from A"))
+	defer a.Close()
+	cfg := &config.Config{
+		Backends: []config.Backend{{Name: "alpha", Pattern: `.*`, URL: a.URL, Model: "alpha-model"}},
+	}
+	for i := range cfg.Backends {
+		cfg.Backends[i].Match("test")
+	}
+	srv := NewServer(cfg)
+
+	// /ghost/... — no such backend or host. The mux has no route registered for /ghost,
+	// so this falls through to the default mux 404. Verify it doesn't accidentally land
+	// on the only backend.
+	body := `{"model":"x","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/ghost/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Errorf("expected non-200 for unknown direct route, got 200")
+	}
+}
+
 func TestChatCompletions_FallbackOnError(t *testing.T) {
 	// First backend returns 500
 	failingBackend := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {

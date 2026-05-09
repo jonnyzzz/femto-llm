@@ -91,13 +91,38 @@ thinking tokens into `message.reasoning` instead of leaking them into `message.c
 
 ## Endpoints
 
+### Default (load-balanced)
+
 | Endpoint | Protocol | Description |
 |---|---|---|
-| `POST /v1/chat/completions` | OpenAI | Chat completions (streaming + non-streaming) |
+| `POST /v1/chat/completions` | OpenAI | Chat completions; model-pattern match → load-aware backend pick |
 | `POST /v1/messages` | Anthropic | Messages API (converted to OpenAI internally) |
-| `GET /v1/models` | OpenAI | List advertised models (with `max_model_len` override) |
-| `GET /health` | — | Health check |
-| `GET /health/backends` | — | Backend health, KV-cache metrics, and prefix trie stats |
+| `GET /v1/models` | OpenAI | List of all advertised models (with optional `max_model_len`) |
+| `GET /health` | — | Liveness probe |
+| `GET /health/backends` | — | Per-backend health, KV-cache metrics, prefix-trie stats |
+
+### Direct per-backend routes
+
+Every backend is also exposed under its own URL prefix, **and** under its URL
+hostname when that hostname is unique across the config. These bypass the
+model-pattern match and the load balancer — they always hit that one backend:
+
+| Endpoint | Description |
+|---|---|
+| `POST /<backend>/v1/chat/completions` | Pinned to backend `<backend>` |
+| `POST /<backend>/v1/messages` | Pinned, Anthropic protocol |
+| `GET /<backend>/v1/models` | Reports only that backend's model |
+| `POST /<host>/v1/chat/completions` | Same, addressed by URL hostname (e.g. `/spark-05/...`) |
+
+Use the direct routes to:
+
+- Pin a long task to one box for prefix-cache locality without putting `@backend`
+  in the model name.
+- Health-test a specific node end-to-end (`curl /spark-05/v1/models`).
+- Drain a node by routing all traffic away from its prefix while you debug it.
+
+The default `/v1/...` endpoints continue to round-robin / load-balance across
+the matched set.
 
 ## Deploy with stevedore
 

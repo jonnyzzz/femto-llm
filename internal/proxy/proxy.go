@@ -56,7 +56,7 @@ func (s *Server) Close() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// OpenAI-compatible endpoints
+	// OpenAI-compatible endpoints (default round-robin over backends matching the request's model)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/v1/models", s.handleModels)
@@ -72,7 +72,30 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("/health/backends", s.handleBackendHealth)
 
+	// Direct per-backend routes (and per-host aliases when unique). See pin.go.
+	hostClaimed := map[string]string{} // host -> backend name (first-wins)
+	for _, b := range s.Config.Backends {
+		s.registerDirectRoutes(mux, b.Name, b.Name)
+		if h := hostFromURL(b.URL); h != "" && h != b.Name {
+			if _, taken := hostClaimed[h]; !taken {
+				hostClaimed[h] = b.Name
+				s.registerDirectRoutes(mux, h, b.Name)
+			}
+		}
+	}
+
 	return mux
+}
+
+// registerDirectRoutes registers /<prefix>/v1/{chat/completions,messages,models}
+// pointing at the underlying handlers but pinned to backendName.
+func (s *Server) registerDirectRoutes(mux *http.ServeMux, prefix, backendName string) {
+	pin := func(h http.HandlerFunc) http.HandlerFunc {
+		return withPinnedBackend(backendName, h)
+	}
+	mux.HandleFunc("/"+prefix+"/v1/chat/completions", pin(s.handleChatCompletions))
+	mux.HandleFunc("/"+prefix+"/v1/messages", pin(s.handleAnthropicMessages))
+	mux.HandleFunc("/"+prefix+"/v1/models", pin(s.handleModels))
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -81,16 +104,35 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models := s.Config.AdvertisedModels()
 	var entries []protocol.ModelEntry
-	for _, m := range models {
-		entries = append(entries, protocol.ModelEntry{
-			ID:          m.Name,
-			Object:      "model",
-			Created:     time.Now().Unix(),
-			OwnedBy:     "femtollm",
-			MaxModelLen: m.MaxContext,
-		})
+	if pinned := PinnedBackendName(r); pinned != "" {
+		// Direct route — advertise only the pinned backend's model.
+		for _, b := range s.Config.Backends {
+			if b.Name != pinned {
+				continue
+			}
+			name := b.Model
+			if name == "" {
+				name = b.Name
+			}
+			entries = append(entries, protocol.ModelEntry{
+				ID:          name,
+				Object:      "model",
+				Created:     time.Now().Unix(),
+				OwnedBy:     "femtollm",
+				MaxModelLen: b.MaxContext,
+			})
+		}
+	} else {
+		for _, m := range s.Config.AdvertisedModels() {
+			entries = append(entries, protocol.ModelEntry{
+				ID:          m.Name,
+				Object:      "model",
+				Created:     time.Now().Unix(),
+				OwnedBy:     "femtollm",
+				MaxModelLen: m.MaxContext,
+			})
+		}
 	}
 
 	resp := protocol.ModelsResponse{Object: "list", Data: entries}
@@ -119,24 +161,37 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	model, preferredBackend := config.ParseModelBackend(req.Model)
 	req.Model = model
 
-	backends := s.Config.FindBackends(model)
-	if preferredBackend != "" {
-		backends = filterByName(backends, preferredBackend)
-	}
-	if len(backends) == 0 {
-		if preferredBackend != "" {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("no backend named %q for model %q", preferredBackend, model))
-		} else {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("no backend for model %q", model))
+	// Direct-route pin (from /<backend>/... or /<host>/... ) wins over pattern matching.
+	pinned := PinnedBackendName(r)
+	var backends []config.Backend
+	if pinned != "" {
+		backends = s.findBackendByName(pinned)
+		if len(backends) == 0 {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("pinned backend %q is not configured", pinned))
+			return
 		}
-		return
+	} else {
+		backends = s.Config.FindBackends(model)
+		if preferredBackend != "" {
+			backends = filterByName(backends, preferredBackend)
+		}
+		if len(backends) == 0 {
+			if preferredBackend != "" {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("no backend named %q for model %q", preferredBackend, model))
+			} else {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("no backend for model %q", model))
+			}
+			return
+		}
 	}
 
 	// Extract prompt for prefix-cache routing
 	prompt := extractPrompt(&req)
 
-	// Select backend using load + prefix-cache scoring
-	backends = s.Balancer.SelectWithPrompt(backends, model, prompt)
+	// Skip load-aware re-ordering when pinned — the caller asked for a specific backend.
+	if pinned == "" {
+		backends = s.Balancer.SelectWithPrompt(backends, model, prompt)
+	}
 
 	// Try backends in order (fallback)
 	var lastErr error
@@ -181,24 +236,37 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	model, preferredBackend := config.ParseModelBackend(req.Model)
 	req.Model = model
 
-	backends := s.Config.FindBackends(model)
-	if preferredBackend != "" {
-		backends = filterByName(backends, preferredBackend)
-	}
-	if len(backends) == 0 {
-		if preferredBackend != "" {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("no backend named %q for model %q", preferredBackend, model))
-		} else {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("no backend for model %q", model))
+	// Direct-route pin (from /<backend>/... or /<host>/... ) wins over pattern matching.
+	pinned := PinnedBackendName(r)
+	var backends []config.Backend
+	if pinned != "" {
+		backends = s.findBackendByName(pinned)
+		if len(backends) == 0 {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("pinned backend %q is not configured", pinned))
+			return
 		}
-		return
+	} else {
+		backends = s.Config.FindBackends(model)
+		if preferredBackend != "" {
+			backends = filterByName(backends, preferredBackend)
+		}
+		if len(backends) == 0 {
+			if preferredBackend != "" {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("no backend named %q for model %q", preferredBackend, model))
+			} else {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("no backend for model %q", model))
+			}
+			return
+		}
 	}
 
 	// Extract prompt for prefix-cache routing
 	prompt := extractAnthropicPrompt(&req)
 
-	// Select backend using load + prefix-cache scoring
-	backends = s.Balancer.SelectWithPrompt(backends, model, prompt)
+	// Skip load-aware re-ordering when pinned — the caller asked for a specific backend.
+	if pinned == "" {
+		backends = s.Balancer.SelectWithPrompt(backends, model, prompt)
+	}
 
 	// Convert to OpenAI format, send to backend, convert response back
 	openaiReq := protocol.AnthropicToOpenAI(&req)
@@ -392,6 +460,18 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func filterByName(backends []config.Backend, name string) []config.Backend {
 	var out []config.Backend
 	for _, b := range backends {
+		if b.Name == name {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// findBackendByName returns the backends configured under the given name,
+// independent of any model regex. Used for direct/pinned routes.
+func (s *Server) findBackendByName(name string) []config.Backend {
+	var out []config.Backend
+	for _, b := range s.Config.Backends {
 		if b.Name == name {
 			out = append(out, b)
 		}
