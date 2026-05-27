@@ -7,8 +7,7 @@
     },
     {
       "name": "gemma4-spark",
-      "url": "http://spark-07:8000",
-      "preferred": true
+      "url": "http://spark-07:8000"
     },
     {
       "name": "gemma4-thor",
