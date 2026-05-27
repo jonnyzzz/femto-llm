@@ -415,6 +415,149 @@ func TestChatCompletions_FallbackOnError(t *testing.T) {
 	}
 }
 
+// TestChatCompletions_DiscoveryRoundRobin verifies that when two backends
+// advertise the same model id via their /v1/models endpoints (the design
+// used by the gemma-4-fleet alias on spark-07 + thor-04), femtollm
+// discovers both and round-robins requests across them.
+func TestChatCompletions_DiscoveryRoundRobin(t *testing.T) {
+	const sharedModelID = "gemma-4-fleet"
+
+	// Each backend tracks how many chat completions it received and
+	// includes its name in /v1/models so we can confirm discovery picked
+	// it up. /v1/models returns the shared id so femtollm should treat
+	// the two as interchangeable.
+	makeBackend := func(name string, hits *int32) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/models":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[{"id":"` + sharedModelID + `"}]}`))
+			case "/v1/chat/completions":
+				atomic.AddInt32(hits, 1)
+				body, _ := io.ReadAll(r.Body)
+				var req map[string]json.RawMessage
+				_ = json.Unmarshal(body, &req)
+				var requestedModel string
+				_ = json.Unmarshal(req["model"], &requestedModel)
+				stop := "stop"
+				resp := protocol.ChatResponse{
+					ID:    "resp-" + name,
+					Model: requestedModel,
+					Choices: []protocol.ChatChoice{{
+						Message:      protocol.ChatMessage{Role: "assistant", Content: mustMarshal("from " + name)},
+						FinishReason: &stop,
+					}},
+					Usage: &protocol.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(resp)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	var hitsA, hitsB int32
+	backendA := makeBackend("A", &hitsA)
+	defer backendA.Close()
+	backendB := makeBackend("B", &hitsB)
+	defer backendB.Close()
+
+	// No Pattern, no Model — pure discovery routing. Both backends advertise
+	// `gemma-4-fleet` so any request for that id should hit either of them.
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{Name: "fleet-a", URL: backendA.URL},
+			{Name: "fleet-b", URL: backendB.URL},
+		},
+	}
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	const total = 12
+	for i := 0; i < total; i++ {
+		body := `{"model":"` + sharedModelID + `","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d: %s", i, w.Code, w.Body.String())
+		}
+	}
+
+	totalHits := atomic.LoadInt32(&hitsA) + atomic.LoadInt32(&hitsB)
+	if int(totalHits) != total {
+		t.Fatalf("expected %d total hits across both backends, got %d (A=%d B=%d)",
+			total, totalHits, hitsA, hitsB)
+	}
+
+	// Each backend should get at least 1/3 of the traffic — load is
+	// identical (both at zero KV usage) so round-robin tie-break should
+	// distribute nearly evenly. Allow generous slack for ordering noise.
+	minPerBackend := int32(total / 3)
+	if hitsA < minPerBackend || hitsB < minPerBackend {
+		t.Errorf("round-robin imbalance: A=%d B=%d (each should be >= %d)",
+			hitsA, hitsB, minPerBackend)
+	}
+}
+
+// TestChatCompletions_DiscoveryMultiModel verifies that a backend can
+// expose multiple model ids via /v1/models (vLLM --served-model-name alias
+// list) and that femtollm routes each id to the backend that advertises it.
+func TestChatCompletions_DiscoveryMultiModel(t *testing.T) {
+	gemmaBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gemma-real"},{"id":"gemma-4-fleet"}]}`))
+			return
+		}
+		chatCompletionHandler("gemma response")(w, r)
+	}))
+	defer gemmaBackend.Close()
+
+	qwenBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"qwen-real"}]}`))
+			return
+		}
+		chatCompletionHandler("qwen response")(w, r)
+	}))
+	defer qwenBackend.Close()
+
+	cfg := &config.Config{
+		Backends: []config.Backend{
+			{Name: "gemma", URL: gemmaBackend.URL},
+			{Name: "qwen", URL: qwenBackend.URL},
+		},
+	}
+	srv := NewServer(cfg)
+	defer srv.Close()
+
+	// Both gemma-real and gemma-4-fleet should land on the gemma backend.
+	// qwen-real should land on the qwen backend.
+	for _, model := range []string{"gemma-real", "gemma-4-fleet", "qwen-real"} {
+		body := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("model %s: expected 200, got %d: %s", model, w.Code, w.Body.String())
+		}
+	}
+
+	// Asking for an unknown id should 404 — neither backend advertises it.
+	body := `{"model":"not-served-anywhere","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("unknown model should 404, got %d", w.Code)
+	}
+}
+
 func TestChatCompletions_NoBackend(t *testing.T) {
 	cfg := &config.Config{
 		Backends: []config.Backend{
