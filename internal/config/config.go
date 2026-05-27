@@ -26,7 +26,13 @@ type Backend struct {
 }
 
 // Match returns true if the model name matches this backend's pattern.
+// Empty pattern returns false — backends without a configured pattern are
+// matched via the health checker's discovered-model list instead (see the
+// proxy package). This avoids "" → matches-everything regex behaviour.
 func (b *Backend) Match(model string) bool {
+	if b.Pattern == "" {
+		return false
+	}
 	if b.compiled == nil {
 		b.compiled = regexp.MustCompile(b.Pattern)
 	}
@@ -92,8 +98,12 @@ func Load(path string) (*Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
-	// Pre-compile regexes
+	// Pre-compile non-empty patterns. Backends without a pattern rely on
+	// discovered-model matching from the health checker.
 	for i := range cfg.Backends {
+		if cfg.Backends[i].Pattern == "" {
+			continue
+		}
 		re, err := regexp.Compile(cfg.Backends[i].Pattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid pattern %q for backend %q: %w", cfg.Backends[i].Pattern, cfg.Backends[i].Name, err)

@@ -52,6 +52,38 @@ func (s *Server) Close() {
 	}
 }
 
+// findBackends returns the backends that should handle the given model.
+//
+// Order of preference:
+//  1. Backends whose health-check discovered model list contains the exact
+//     `model` ID. This is the authoritative source — the backend just told
+//     us via /v1/models that it serves that name. No config required.
+//  2. Backends whose configured `pattern` regex matches `model`. This is
+//     the legacy path, kept for explicit overrides (e.g. when a backend
+//     should also receive requests for an aliased name not in its
+//     advertised list).
+//
+// If both apply, discovered matches come first.
+func (s *Server) findBackends(model string) []config.Backend {
+	var byDiscovery []config.Backend
+	seen := map[string]bool{}
+	if s.Checker != nil {
+		for _, b := range s.Config.Backends {
+			if s.Checker.Serves(b.Name, model) {
+				byDiscovery = append(byDiscovery, b)
+				seen[b.Name] = true
+			}
+		}
+	}
+	for _, b := range s.Config.FindBackends(model) {
+		if !seen[b.Name] {
+			byDiscovery = append(byDiscovery, b)
+			seen[b.Name] = true
+		}
+	}
+	return byDiscovery
+}
+
 // Handler returns the HTTP handler for the proxy.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -106,32 +138,73 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	var entries []protocol.ModelEntry
 	if pinned := PinnedBackendName(r); pinned != "" {
-		// Direct route — advertise only the pinned backend's model.
-		for _, b := range s.Config.Backends {
-			if b.Name != pinned {
-				continue
+		// Direct route — advertise only the models this backend has
+		// reported via its own /v1/models. Fall back to the configured
+		// override (or the backend name) if discovery has not produced
+		// anything yet.
+		var b *config.Backend
+		for i := range s.Config.Backends {
+			if s.Config.Backends[i].Name == pinned {
+				b = &s.Config.Backends[i]
+				break
 			}
-			name := b.Model
-			if name == "" {
-				name = b.Name
+		}
+		if b != nil {
+			models := s.Checker.Models(b.Name)
+			if len(models) == 0 {
+				name := b.Model
+				if name == "" {
+					name = b.Name
+				}
+				models = []string{name}
 			}
-			entries = append(entries, protocol.ModelEntry{
-				ID:          name,
-				Object:      "model",
-				Created:     time.Now().Unix(),
-				OwnedBy:     "femtollm",
-				MaxModelLen: b.MaxContext,
-			})
+			for _, m := range models {
+				entries = append(entries, protocol.ModelEntry{
+					ID:          m,
+					Object:      "model",
+					Created:     time.Now().Unix(),
+					OwnedBy:     "femtollm",
+					MaxModelLen: b.MaxContext,
+				})
+			}
 		}
 	} else {
-		for _, m := range s.Config.AdvertisedModels() {
+		// Aggregate discovered models from every alive backend. Falls
+		// back to whatever the config advertised if no backend has been
+		// probed yet (cold start).
+		discovered := s.Checker.AllModels()
+		seen := map[string]bool{}
+		for _, id := range discovered {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			maxCtx := 0
+			for _, b := range s.Config.Backends {
+				if b.MaxContext > 0 && s.Checker.Serves(b.Name, id) {
+					if maxCtx == 0 || b.MaxContext < maxCtx {
+						maxCtx = b.MaxContext
+					}
+				}
+			}
 			entries = append(entries, protocol.ModelEntry{
-				ID:          m.Name,
+				ID:          id,
 				Object:      "model",
 				Created:     time.Now().Unix(),
 				OwnedBy:     "femtollm",
-				MaxModelLen: m.MaxContext,
+				MaxModelLen: maxCtx,
 			})
+		}
+		if len(entries) == 0 {
+			for _, m := range s.Config.AdvertisedModels() {
+				entries = append(entries, protocol.ModelEntry{
+					ID:          m.Name,
+					Object:      "model",
+					Created:     time.Now().Unix(),
+					OwnedBy:     "femtollm",
+					MaxModelLen: m.MaxContext,
+				})
+			}
 		}
 	}
 
@@ -171,7 +244,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		backends = s.Config.FindBackends(model)
+		backends = s.findBackends(model)
 		if preferredBackend != "" {
 			backends = filterByName(backends, preferredBackend)
 		}
@@ -246,7 +319,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	} else {
-		backends = s.Config.FindBackends(model)
+		backends = s.findBackends(model)
 		if preferredBackend != "" {
 			backends = filterByName(backends, preferredBackend)
 		}

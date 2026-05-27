@@ -3,25 +3,16 @@
   "backends": [
     {
       "name": "qwen36-spark-05",
-      "pattern": "(?i)qwen",
-      "url": "http://spark-05:8006",
-      "model": "Qwen/Qwen3.6-27B-FP8",
-      "max_context": 262144
+      "url": "http://spark-05:8006"
     },
     {
       "name": "gemma4-spark",
-      "pattern": "(?i)(gemma|gemini)",
       "url": "http://spark-07:8000",
-      "model": "google/gemma-4-31B-it",
-      "max_context": 32768,
       "preferred": true
     },
     {
       "name": "gemma4-thor",
-      "pattern": "(?i)(gemma|gemini)",
-      "url": "http://thor-04:8000",
-      "model": "google/gemma-4-31B-it",
-      "max_context": 131072
+      "url": "http://thor-04:8000"
     }
   ]
 }

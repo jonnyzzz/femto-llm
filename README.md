@@ -4,7 +4,8 @@ Minimal LLM proxy router with protocol conversion and fallback support. Routes r
 
 ## Features
 
-- **Model-based routing** — regex patterns match model names to backends
+- **Discovery-based routing** — femtollm scrapes each backend's `/v1/models` on every health check, then routes incoming requests to backends that actually advertise the requested model. No model names in config required.
+- **Pattern routing (legacy / optional)** — regex `pattern` in config still works as an explicit override, useful for aliasing names that aren't in a backend's advertised list.
 - **Protocol conversion** — Anthropic Messages API to OpenAI Chat Completions
 - **Fallback** — multiple backends per model, tries in order on 5xx errors
 - **Load-aware routing** — scrapes vLLM `/metrics` for KV-cache usage and queue depth
@@ -28,30 +29,24 @@ cp config.example.json config.json
 
 ## Configuration
 
+The minimal config now just lists the upstream URLs. femtollm probes each
+one's `/v1/models` and routes incoming requests by the model IDs each backend
+reports. The `model` and `pattern` fields are kept for backward compatibility
+but are optional.
+
 ```json
 {
   "listen": ":8880",
-  "health_check_interval": "30s",
-  "health_check_timeout": "5s",
   "backends": [
-    {
-      "name": "gemma4-spark",
-      "pattern": ".*",
-      "url": "http://spark-07:8000",
-      "model": "google/gemma-4-31B-it",
-      "max_context": 106496,
-      "preferred": true
-    },
-    {
-      "name": "gemma4-thor",
-      "pattern": ".*",
-      "url": "http://thor-04:8000",
-      "model": "google/gemma-4-31B-it",
-      "max_context": 106496
-    }
+    { "name": "gemma4-spark", "url": "http://spark-07:8000", "preferred": true },
+    { "name": "gemma4-thor",  "url": "http://thor-04:8000" }
   ]
 }
 ```
+
+When the upstream serves a model under multiple aliases via vLLM
+`--served-model-name`, **all** the aliases are picked up and become routable —
+no extra config needed.
 
 ### Backend options
 

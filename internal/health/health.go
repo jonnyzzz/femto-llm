@@ -2,6 +2,7 @@ package health
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -16,10 +17,22 @@ type Status struct {
 	Alive     bool
 	LastCheck time.Time
 	LastError string
+	// Models advertised by this backend via /v1/models. Refreshed on each
+	// health check. Empty if the backend is down or the response could not
+	// be parsed.
+	Models []string
 	// Metrics from vLLM /metrics endpoint (updated each health check)
 	KVCacheUsage    float64 // 0.0–1.0, fraction of KV-cache in use
 	RequestsRunning int     // number of requests currently being processed
 	RequestsWaiting int     // number of requests queued
+}
+
+// modelsResponse is the minimal shape of a /v1/models response.
+type modelsResponse struct {
+	Data []struct {
+		ID          string `json:"id"`
+		MaxModelLen int    `json:"max_model_len"`
+	} `json:"data"`
 }
 
 // Load returns a score representing how loaded this backend is (lower = less loaded).
@@ -87,6 +100,70 @@ func (c *Checker) IsAlive(name string) bool {
 	return s.Alive
 }
 
+// Models returns the list of model IDs the backend advertised on its last
+// successful health check. Returns nil if the backend is unknown or down.
+func (c *Checker) Models(name string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	s, ok := c.status[name]
+	if !ok || !s.Alive {
+		return nil
+	}
+	out := make([]string, len(s.Models))
+	copy(out, s.Models)
+	return out
+}
+
+// Serves returns true if the backend is alive and advertises the given model.
+// Comparison is case-sensitive (model IDs are typically exact).
+func (c *Checker) Serves(name, model string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	s, ok := c.status[name]
+	if !ok || !s.Alive {
+		return false
+	}
+	for _, m := range s.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+// AllModels returns the deduplicated set of model IDs advertised by any
+// currently-alive backend.
+func (c *Checker) AllModels() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range c.status {
+		if !s.Alive {
+			continue
+		}
+		for _, m := range s.Models {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // GetStatus returns the full status for a backend (nil if unknown).
 func (c *Checker) GetStatus(name string) *Status {
 	c.mu.RLock()
@@ -137,7 +214,8 @@ func (c *Checker) loop() {
 }
 
 func (c *Checker) checkOne(b *Backend) {
-	// Health check via /v1/models
+	// Health check via /v1/models — also parses the response body to
+	// discover what model names the backend will accept.
 	url := strings.TrimRight(b.URL, "/") + "/v1/models"
 	resp, err := c.client.Get(url)
 
@@ -155,17 +233,35 @@ func (c *Checker) checkOne(b *Backend) {
 		wasAlive := s.Alive
 		s.Alive = false
 		s.LastError = err.Error()
+		s.Models = nil
 		if wasAlive {
 			log.Printf("health: backend %s is DOWN: %v", b.Name, err)
 		}
 		return
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		wasAlive := s.Alive
 		s.Alive = true
 		s.LastError = ""
+		// Parse model IDs from the response. Backends like vLLM return
+		// {"data":[{"id":"google/gemma-4-31B-it", ...}, ...]}.
+		// Multiple model IDs may come from --served-model-name aliases.
+		var mr modelsResponse
+		if json.Unmarshal(body, &mr) == nil {
+			models := make([]string, 0, len(mr.Data))
+			for _, m := range mr.Data {
+				if m.ID != "" {
+					models = append(models, m.ID)
+				}
+			}
+			if !equalStrings(s.Models, models) {
+				log.Printf("health: backend %s advertises models %v", b.Name, models)
+			}
+			s.Models = models
+		}
 		if !wasAlive {
 			log.Printf("health: backend %s is UP", b.Name)
 		}
@@ -173,6 +269,7 @@ func (c *Checker) checkOne(b *Backend) {
 		wasAlive := s.Alive
 		s.Alive = false
 		s.LastError = resp.Status
+		s.Models = nil
 		if wasAlive {
 			log.Printf("health: backend %s is DOWN: %s", b.Name, resp.Status)
 		}
