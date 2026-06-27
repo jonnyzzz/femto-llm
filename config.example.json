@@ -2,7 +2,7 @@
   "listen": ":8880",
   "backends": [
     {
-      "name": "qwen36-spark-05",
+      "name": "ornith-spark-05",
       "url": "http://spark-05:8006"
     },
     {
