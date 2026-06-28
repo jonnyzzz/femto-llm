@@ -3,15 +3,18 @@
   "backends": [
     {
       "name": "ornith-spark-05",
-      "url": "http://spark-05:8006"
+      "url": "http://spark-05:8006",
+      "max_context": 262144
     },
     {
       "name": "gemma4-spark",
-      "url": "http://spark-07:8000"
+      "url": "http://spark-07:8000",
+      "max_context": 131072
     },
     {
       "name": "gemma4-thor",
-      "url": "http://thor-04:8000"
+      "url": "http://thor-04:8000",
+      "max_context": 131072
     }
   ]
 }
